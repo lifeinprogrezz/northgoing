@@ -17,9 +17,12 @@
 //      /perk/UUID and /Perk/UUID are the SAME posting (the Perk / TravelPerk class:
 //      one company scraped under two board-name casings). Greenhouse is exempt: its
 //      embedded boards need ?gh_jid=, and its paths are case-sensitive.
-//   3. Every host: strip ONE trailing slash from a path longer than "/"
-//      (`/careers/<uuid>/` vs `/careers/<uuid>`, nordsecurity via startupmap, 9
-//      groups). The root path stays "/".
+//   3. Every host: strip every trailing slash from the path (`/careers/<uuid>/`
+//      vs `/careers/<uuid>`, nordsecurity via startupmap, 9 groups). The root
+//      path stays "/". ALL of them, not one (review round 1, 2026-09-07): with one
+//      slash "/a//" canonicalized to "/a/" and a second pass to "/a", so canonUrl
+//      was not a fixpoint and the merge migration, which mirrors this rule,
+//      rewrote such a row on every rerun instead of none.
 // Anything `new URL` rejects is returned unchanged: a bad url is a source bug to
 // surface downstream, not something to guess at here.
 
@@ -37,9 +40,7 @@ export function canonUrl(u) {
       x.hash = "";
       x.pathname = x.pathname.toLowerCase();
     }
-    if (x.pathname.length > 1 && x.pathname.endsWith("/")) {
-      x.pathname = x.pathname.slice(0, -1);
-    }
+    x.pathname = x.pathname.replace(/\/+$/, "") || "/";
     return x.toString();
   } catch { return u; }
 }

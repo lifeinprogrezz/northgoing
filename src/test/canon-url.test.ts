@@ -44,7 +44,7 @@ describe("personio host fold", () => {
 });
 
 describe("trailing slash", () => {
-  it("strips one trailing slash from a path longer than / on any host", () => {
+  it("strips the trailing slash from a path longer than / on any host", () => {
     expect(canonUrl("https://nordsecurity.com/careers/8b1c2d3e-0000-4000-8000-000000000000/")).toBe(
       "https://nordsecurity.com/careers/8b1c2d3e-0000-4000-8000-000000000000",
     );
@@ -58,7 +58,38 @@ describe("trailing slash", () => {
     expect(canonUrl("https://example.com/")).toBe("https://example.com/");
     expect(canonUrl("https://example.com")).toBe("https://example.com/");
   });
+
+  // Review round 1 (2026-09-07): the rule stripped ONE slash, so "/a//" canonicalized
+  // to "/a/" and a second pass to "/a". The merge migration mirrors the rule and
+  // claims a rerun is a no-op; on a double-slash row that took three runs. Every
+  // trailing slash goes now, and canonUrl is a fixpoint.
+  it("strips every trailing slash, not just one", () => {
+    expect(canonUrl("https://acme.com/careers/y//")).toBe("https://acme.com/careers/y");
+    expect(canonUrl("https://acme.com/careers/y///?ref=x")).toBe("https://acme.com/careers/y?ref=x");
+    expect(canonUrl("https://example.com//")).toBe("https://example.com/");
+  });
+
+  it("is a fixpoint: canonUrl(canonUrl(u)) equals canonUrl(u)", () => {
+    for (const u of FIXPOINT_CORPUS) {
+      const once = canonUrl(u);
+      expect(canonUrl(once), u).toBe(once);
+    }
+  });
 });
+
+/** Every input the rules above touch, plus the double-slash straggler that broke rerun. */
+const FIXPOINT_CORPUS = [
+  "https://jobs.lever.co/Perk/AbC-123?lever-source=LinkedIn#apply",
+  "https://jobs.ashbyhq.com/TravelPerk/9F1E?utm_source=x",
+  "https://apply.workable.com/Acme/j/ABCDEF1234/?utm_medium=y",
+  "https://boards.greenhouse.io/Acme/jobs/4012345?gh_jid=4012345",
+  "https://vytal.jobs.personio.com/job/1234567?language=en",
+  "https://nordsecurity.com/careers/8b1c2d3e-0000-4000-8000-000000000000/",
+  "https://example.com/jobs/42/?ref=startupmap",
+  "https://acme.com/careers/y//",
+  "https://example.com//",
+  "https://example.com/",
+];
 
 describe("non-url input", () => {
   it("returns anything new URL rejects unchanged", () => {

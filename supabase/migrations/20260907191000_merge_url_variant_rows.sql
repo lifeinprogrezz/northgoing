@@ -18,7 +18,10 @@
 --      personio .com -> .de, then on lever/ashby/workable/smartrecruiters/breezy
 --      drop the query+fragment and lowercase the path (greenhouse keeps both:
 --      embedded boards need ?gh_jid= and its paths are case-sensitive), then strip
---      one trailing slash from a path longer than "/".
+--      every trailing slash from the path (the root "/" stays). Every one, not
+--      one (review round 1, 2026-09-07): one slash made the key no fixpoint, so a
+--      "/a//" row was rewritten to "/a/" on the first run and to "/a" on the
+--      second, and the no-op-on-rerun claim below was false.
 --   2. groups = keys with more than one row. Keeper = the row whose url already IS
 --      the canonical form (the next scrape refreshes it through the url upsert),
 --      else the oldest created_at. Guard: a group with no canonical row and a tie
@@ -33,13 +36,18 @@
 --   4. the variant is set is_live = false. NO jobs row is deleted: the FK cascades
 --      on scores/saved/dismissed/applications would wipe user data, and a retired
 --      row can be flipped back.
---   5. a row that is alone under its key but is not spelled canonically (a
+--   5. a row that will stand alone under its key but is not spelled canonically
+--      gets its url rewritten to the canonical form. Two shapes: a lone row (a
 --      startupmap .com personio url with no .de twin yet, a lone trailing slash)
---      gets its url rewritten to the canonical form. Without this the very first
---      scrape after canon-url.mjs ships would insert the canonical twin next to
---      it, and the old row would never retire: scrape.mjs only retires rows of
---      board sources, and the liveness sweep sees a live mirror. Guarded against
---      any existing row already holding the target url.
+--      and the keeper of a group that had NO canonical row, chosen by age in step
+--      2 (review round 1, 2026-09-07: that keeper was left as is, so the first
+--      scrape after canon-url.mjs shipped upserted the canonical twin beside it,
+--      the very duplicate this file removes, with the merged refs stranded on the
+--      stale row). Without the rewrite the old row never retires: scrape.mjs only
+--      retires rows of board sources, and the liveness sweep sees a live mirror.
+--      Guarded against any existing row already holding the target url; with a
+--      fixpoint key that row would sit in the same group, so the guard is belt
+--      and braces.
 -- Rerunning is a no-op: retired variants with no refs move nothing, rewritten
 -- singles equal their key. Counts are raised as notices per class.
 --
@@ -70,6 +78,7 @@ declare
   v_singles_personio integer;
   v_singles_slash   integer;
   v_singles_case    integer;
+  v_singles_keeper  integer;
 begin
   -- 1. normalized key per row. Keep this expression identical to the dry-run
   --    SELECT in the PR that shipped this file and to scripts/canon-url.mjs.
@@ -96,7 +105,7 @@ begin
             end as rest
           from parts
         )
-        select sh || regexp_replace(rest, '^(/[^?#]+?)/((?:[?#].*)?)$', '\1\2') from stripped
+        select sh || regexp_replace(rest, '^(/[^?#]*?)/+((?:[?#].*)?)$', '\1\2') from stripped
       ),
       j.url
     ) as canon
@@ -235,27 +244,32 @@ begin
   where j.id = v.variant_id and j.is_live;
   get diagnostics v_retired = row_count;
 
-  -- 5. lone rows spelled non-canonically: rewrite the url so the next scrape
-  --    refreshes them instead of inserting a twin.
+  -- 5. rows that stand alone under their key from here on but are spelled
+  --    non-canonically (a lone row, or the age-chosen keeper of a group with no
+  --    canonical row): rewrite the url so the next scrape refreshes them instead
+  --    of inserting a twin.
   create temporary table merge_singles on commit drop as
   select
     k.id,
     k.url,
     k.canon,
+    (g.canon is not null) as is_keeper,
     case
       when lower(substring(k.url from '^https?://([^/?#]+)')) ~ '\.jobs\.personio\.com$' then 'personio'
       when substring(k.url from '^https?://[^/?#]+(/[^?#]*)') ~ '^/.+/$' then 'trailing-slash'
       else 'case'
     end as class
   from merge_keyed k
+  left join merge_groups g on g.canon = k.canon
   where k.url <> k.canon
-    and not exists (select 1 from merge_keyed o where o.canon = k.canon and o.id <> k.id)
+    and (g.canon is null or (k.id = g.keeper_id and not g.has_canonical and not g.oldest_tie))
     and not exists (select 1 from public.jobs x where x.url = k.canon);
 
   select count(*) into v_singles from merge_singles;
   select count(*) into v_singles_personio from merge_singles where class = 'personio';
   select count(*) into v_singles_slash from merge_singles where class = 'trailing-slash';
   select count(*) into v_singles_case from merge_singles where class = 'case';
+  select count(*) into v_singles_keeper from merge_singles where is_keeper;
 
   update public.jobs j set url = s.canon
   from merge_singles s
@@ -265,7 +279,7 @@ begin
     v_groups, v_retired, v_personio, v_slash, v_case, v_skipped, v_no_canonical;
   raise notice 'merge_url_variant_rows: variants in scope % (retired earlier or now); refs moved/dropped: scores %/%, saved_jobs %/%, dismissed_jobs %/%, applications %/%; artifacts moved %, left on variant %',
     v_variants, v_scores_moved, v_scores_dropped, v_saved_moved, v_saved_dropped, v_dism_moved, v_dism_dropped, v_apps_moved, v_apps_dropped, v_art_moved, v_art_left;
-  raise notice 'merge_url_variant_rows: % lone row(s) rewritten to the canonical url (personio %, trailing-slash %, case %)',
-    v_singles, v_singles_personio, v_singles_slash, v_singles_case;
+  raise notice 'merge_url_variant_rows: % row(s) rewritten to the canonical url (personio %, trailing-slash %, case %), % of them age-chosen keeper(s) of a group with no canonical row',
+    v_singles, v_singles_personio, v_singles_slash, v_singles_case, v_singles_keeper;
 end
 $$;
