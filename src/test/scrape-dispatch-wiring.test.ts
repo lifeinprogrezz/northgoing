@@ -1,9 +1,9 @@
 // The WIRING of api/scrape-dispatch.ts: pg_cron's daily start of the scrape.
 //
 // The endpoint is small, and every line of it is a way to lose a morning
-// without a word. Four mutations were written against it, each one a scrape
+// without a word. Five mutations were written against it, each one a scrape
 // that silently does not happen or a stranger who can make it happen, and the
-// four cases below kill exactly those four. Each was watched fail against its
+// five cases below kill exactly those five. Each was watched fail against its
 // own mutant before it was kept:
 //
 //   1. the cronAuthResult guard deleted, leaving the endpoint public.
@@ -15,10 +15,15 @@
 //   4. the SCRAPE_DISPATCH_TOKEN guard deleted, so GitHub is called with an
 //      empty bearer and the endpoint reports GitHub's refusal instead of its own
 //      missing configuration.
+//   5. (review round 1, 2026-09-07) the catch block of dispatchWorkflow returning
+//      true, so a fetch that never reached GitHub ("fetch failed", the most
+//      common egress failure in the scrape logs) answers 200 {dispatched: true}.
+//      Cases 1 to 4 only ever RESOLVE the injected fetch; this mutant survived
+//      all of them.
 //
 // Same seam as src/test/scrape-watchdog-wiring.test.ts: injected dependencies
 // with real defaults.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { handler, SCHEDULED_DISPATCH_REASON } from "../../api/scrape-dispatch";
 import { WATCHDOG_DISPATCH_REASON } from "@/lib/scrapeWatchdog";
 
@@ -115,6 +120,41 @@ describe("api/scrape-dispatch wiring", () => {
     expect(calls).toHaveLength(1);
     expect(seen.status).toBe(502);
     expect(seen.body).toMatchObject({ ok: false, dispatched: false });
+  });
+
+  it("answers 502 and does not throw when the fetch itself throws (mutant: the catch block returns true)", async () => {
+    // The request never reached GitHub: a proxy drop, a DNS miss, an aborted
+    // socket. Node's fetch surfaces every one of them as a thrown TypeError
+    // whose message is "fetch failed", and the scrape logs show it is the most
+    // common way an outbound call dies. Nothing was started, so the endpoint
+    // must say so. The case above only covers a fetch that RESOLVED with a bad
+    // status; a fetch that REJECTS takes a different branch, and a mutant that
+    // made that branch report success survived every other case in this file.
+    const attempts: Call[] = [];
+    const thrown = new TypeError("fetch failed");
+    const rejectingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      attempts.push({ url: String(input), method: init?.method ?? "GET" });
+      throw thrown;
+    }) as unknown as typeof fetch;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { res, seen } = fakeRes();
+
+    try {
+      await expect(handler(authed, res, { fetchImpl: rejectingFetch })).resolves.toBeUndefined();
+
+      // GitHub WAS asked, once. This is what separates a dead network from the
+      // missing-token case below, which must not ask at all.
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].url).toBe("https://api.github.com/repos/acme/northgoing/actions/workflows/scrape.yml/dispatches");
+      expect(seen.status).toBe(502);
+      expect(seen.body).toMatchObject({ ok: false, dispatched: false, reason: SCHEDULED_DISPATCH_REASON });
+      // And it was said out loud, with the cause, on the catch path: a false
+      // that nobody logged would be the next silent failure. (reportApiError is
+      // a no-op without a Sentry DSN, so the warn line is the observable side.)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("[scrape-dispatch] GitHub dispatch failed:"), thrown);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("answers 500 and makes no GitHub call when SCRAPE_DISPATCH_TOKEN is missing (mutant: drop the token guard)", async () => {

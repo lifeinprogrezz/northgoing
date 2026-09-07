@@ -24,9 +24,10 @@
 // token is a 500, a refused dispatch is a 502, both reported to Sentry; success
 // is silent. Pinned by src/test/scrape-dispatch-wiring.test.ts: refused auth
 // makes no GitHub call, the body carries ref main + reason scheduled, a refused
-// dispatch answers non-2xx without throwing, a missing token answers 500 with no
-// call. Rule and code move together. The seam is the deps argument, defaulting
-// to the real fetch, the same shape as api/scrape-watchdog.ts.
+// dispatch answers non-2xx without throwing, a fetch that throws before GitHub
+// answers also 502 without throwing, a missing token answers 500 with no call.
+// Rule and code move together. The seam is the deps argument, defaulting to the
+// real fetch, the same shape as api/scrape-watchdog.ts.
 //
 // Env: CRON_SECRET / CRON_SECRET_DB + SCRAPE_DISPATCH_TOKEN (required here,
 // optional for the watchdog) + optional SCRAPE_DISPATCH_REPO.
