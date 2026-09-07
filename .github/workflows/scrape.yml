@@ -145,9 +145,15 @@ jobs:
       # workday, factorial, bigtech and seed sources (the board-diff above never
       # re-scans them). Conservative verdicts: 404/410 + slug-dropping redirects
       # retire; 403/5xx/timeout are left alone. Oldest-checked-first rotation.
+      # 200 -> 600 rows per night (2026-09-07): the class had grown to 5,077 live
+      # rows (startupmap alone 3,609 after its catalogue doubled on 9-03), so a
+      # full cycle took ~25 nights and 3,062 live rows sat with posted_at older
+      # than 90 days. 600 cycles the class in ~8 nights. An age tilt in the
+      # ranker was rejected instead: measured 2026-07-26, freshness does not
+      # predict match quality (docs/specs/2026-07-26-economics-decisions.md).
       - name: Liveness sweep over immortal-class rows (retire dead URLs)
         continue-on-error: true # hygiene; a hiccup must never fail the core scrape
-        run: node scripts/liveness-sweep.mjs --apply --limit 200
+        run: node scripts/liveness-sweep.mjs --apply --limit 600
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
