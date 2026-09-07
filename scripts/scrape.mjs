@@ -21,6 +21,7 @@ import { sources as bigtechSources } from "./sources/bigtech.mjs";
 import { sources as vcSources } from "./sources/vc-startupmap.mjs";
 import { fetchTeamtailor } from "./sources/teamtailor.mjs";
 import { fetchPersonio } from "./sources/personio.mjs";
+import { canonUrl } from "./canon-url.mjs";
 import { fetchRecruitee } from "./sources/recruitee.mjs";
 import { fetchJoin } from "./sources/joincom.mjs";
 
@@ -220,26 +221,11 @@ async function main() {
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-  // Canonicalize before dedup: tracking suffixes (?lever-source=..., utm) on ATS
-  // hosts create duplicate rows under jobs.url UNIQUE — the 01Health/32Co class.
-  // Greenhouse is exempt (its embedded boards need ?gh_jid=). Board-class sources
-  // are listed first in SOURCES, so on collision the correctly-attributed row wins.
-  const STRIP_QUERY_HOSTS = [/(^|\.)lever\.co$/, /(^|\.)ashbyhq\.com$/, /(^|\.)workable\.com$/, /(^|\.)smartrecruiters\.com$/, /(^|\.)breezy\.hr$/];
-  const canonUrl = (u) => {
-    try {
-      const x = new URL(u);
-      if (STRIP_QUERY_HOSTS.some((re) => re.test(x.hostname))) {
-        x.search = "";
-        x.hash = "";
-        // Ashby/Lever board tokens are case-insensitive: /perk/UUID and /Perk/UUID
-        // are the SAME posting. Lowercasing the path collapses the case-duplicate
-        // rows the jobs.url UNIQUE constraint would otherwise keep (the Perk /
-        // TravelPerk class — one company scraped under two board-name casings).
-        x.pathname = x.pathname.toLowerCase();
-      }
-      return x.toString();
-    } catch { return u; }
-  };
+  // Canonicalize before dedup: two spellings of one posting would be two rows under
+  // jobs.url UNIQUE. The rules (query strip + lowercase on the five ATS hosts,
+  // personio .com -> .de, trailing slash) live in canon-url.mjs, pinned by
+  // src/test/canon-url.test.ts. Board-class sources are listed first in SOURCES,
+  // so on collision the correctly-attributed row wins.
   all = all.map((j) => ({ ...j, url: canonUrl(j.url) }));
   // All-vertical (#34): stamp jobs.role_family on EVERY row, centrally, so each
   // source (incl. sources/*.mjs) writes it without per-adapter code. The nightly
