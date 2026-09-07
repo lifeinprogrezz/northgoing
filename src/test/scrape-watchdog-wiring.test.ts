@@ -16,7 +16,12 @@
 // its own mutant before it was kept. A guard nobody has seen catch anything is
 // not yet a guard. The seam is the repo's usual one: injected dependencies with
 // real defaults, the same shape as confirmGmailForwarding in api/inbound-email.ts.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+//
+// A fifth mutation (review round 1, 2026-09-07): the shared dispatchWorkflow's
+// catch block returning true, so a restart whose request never reached GitHub
+// emails "restarting the scrape" while no run exists. Every fetch above
+// RESOLVES; the last case in the file is the one that REJECTS.
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { handler, probeDataplane, type StorageClient } from "../../api/scrape-watchdog";
 import { decideDataplaneFreshness } from "@/lib/scrapeWatchdog";
 
@@ -45,8 +50,16 @@ function fakeStorage(result: ListResult) {
 
 type Call = { url: string; method: string; body?: string };
 
-/** Records every outbound call and answers Resend and GitHub the way they do. */
-function recordingFetch(calls: Call[], runsBody: unknown = { workflow_runs: [] }): typeof fetch {
+/**
+ * Records every outbound call and answers Resend and GitHub the way they do.
+ * `dispatchError`, when given, makes the dispatch call REJECT after it is
+ * recorded: the request left, and never got an answer.
+ */
+function recordingFetch(
+  calls: Call[],
+  runsBody: unknown = { workflow_runs: [] },
+  dispatchError?: Error,
+): typeof fetch {
   const reply = (status: number, body: unknown) =>
     ({
       ok: status < 400,
@@ -58,7 +71,10 @@ function recordingFetch(calls: Call[], runsBody: unknown = { workflow_runs: [] }
     const url = String(input);
     calls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
     if (url.includes("/runs?")) return reply(200, runsBody);
-    if (url.endsWith("/dispatches")) return reply(204, {});
+    if (url.endsWith("/dispatches")) {
+      if (dispatchError) throw dispatchError;
+      return reply(204, {});
+    }
     if (url.startsWith("https://api.resend.com")) return reply(200, { id: "email_test" });
     return reply(404, { message: "unrouted in test" });
   }) as unknown as typeof fetch;
@@ -252,5 +268,51 @@ describe("the endpoint's wiring", () => {
     // the deployment spend a call on their behalf.
     expect(listed).toEqual([]);
     expect(calls).toEqual([]);
+  });
+
+  it("reports the restart as FAILED and emails 'could not restart it' when the dispatch request throws (mutant: dispatchWorkflow's catch returns true)", async () => {
+    // The same morning as the 2026-08-28 regression above, so the decision IS to
+    // restart. This time the POST to GitHub dies on the wire: Node's fetch
+    // rejects with TypeError "fetch failed" (proxy drop, DNS miss, aborted
+    // socket). No run was started. The email the owner reads at breakfast has
+    // to say "could not restart it", and the response has to carry
+    // dispatchFailed, or the morning is lost while the watchdog reports it
+    // healed.
+    const { client } = fakeStorage({
+      data: [{ name: "dataplane.json", updated_at: ago(15.6 * HOUR) }],
+      error: null,
+    });
+    const calls: Call[] = [];
+    const fetchImpl = recordingFetch(
+      calls,
+      {
+        workflow_runs: [
+          { created_at: ago(20.8 * HOUR), display_title: "Scrape jobs" },
+          { created_at: ago(30 * HOUR), display_title: "Scrape jobs (watchdog restart)" },
+        ],
+      },
+      new TypeError("fetch failed"),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { res, seen } = fakeRes();
+
+    try {
+      await expect(handler(authed, res, { createStorageClient: () => client, fetchImpl })).resolves.toBeUndefined();
+
+      // The restart WAS attempted: this is a dead wire, not a withheld decision.
+      expect(calls.filter((c) => c.url.endsWith("/dispatches"))).toHaveLength(1);
+      expect(seen.status).toBe(200);
+      expect(seen.body).toMatchObject({ dispatchPlanned: true, dispatched: false, dispatchFailed: true, emailed: true });
+      // And the email tells the truth. The subject is the one line the owner
+      // sees without opening it.
+      const email = calls.find((c) => c.url.startsWith("https://api.resend.com"));
+      const payload = JSON.parse(email?.body ?? "{}") as { subject?: string; text?: string };
+      expect(payload.subject).toContain("(could not restart it)");
+      expect(payload.subject).not.toContain("(restarting the scrape)");
+      expect(payload.text).toContain("GitHub refused the request, so nothing was started");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("[scrape-watchdog] GitHub dispatch failed:"), expect.any(TypeError));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
