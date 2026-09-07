@@ -9,6 +9,10 @@
 // follow them, because it is a ten-step Node pipeline that needs a runner, the
 // service-role key and minutes of runtime, and pg_cron can only make one HTTP
 // call. So the scrape keeps its GitHub schedule and gets a watchdog instead.
+// (2026-09-07: the daily start moved to pg_cron as well, through
+// api/scrape-dispatch.ts, after GitHub's schedule fired late seven mornings
+// running. This watchdog is unchanged and stays the guard for the morning that
+// dispatch never reaches GitHub.)
 //
 // THE SIGNAL. The last step of the scrape workflow publishes the dataplane to
 // Supabase Storage. Because it is the LAST step, a fresh timestamp on
@@ -315,7 +319,7 @@ export function buildWatchdogBody(
     "",
     "What to check, in this order:",
     "1. The Scrape jobs workflow in the repository's Actions tab. A red run tells you which step broke.",
-    "2. No run at all means the GitHub scheduler skipped it again. Start it by hand from the same tab.",
+    "2. No run at all means the 03:47 pg_cron dispatch did not reach GitHub (api/scrape-dispatch.ts, pg_cron job northgoing-scrape-dispatch). Start it by hand from the same tab.",
     "3. The job pool keeps serving yesterday's artifact meanwhile, so the site stays up. It just stops growing.",
     "",
     `Checked at ${checkedAt}.`,

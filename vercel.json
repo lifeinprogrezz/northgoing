@@ -27,6 +27,9 @@
     },
     "api/scrape-watchdog.ts": {
       "maxDuration": 30
+    },
+    "api/scrape-dispatch.ts": {
+      "maxDuration": 30
     }
   },
   "redirects": [

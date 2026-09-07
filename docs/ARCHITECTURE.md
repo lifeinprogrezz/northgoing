@@ -30,12 +30,13 @@ Three surfaces, all behind sign-in except the map:
 ```
  GitHub Actions (cron)          Vercel                    Supabase
  ─────────────────────          ──────                    ────────
- scrape.yml      05:00 UTC  →   api/nightly.ts        →   Postgres  (jobs, companies,
+ scrape.yml      03:47 UTC* →   api/nightly.ts        →   Postgres  (jobs, companies,
  nightly.yml     */10 6-9   →   api/score-backlog.ts  →              profiles, scores,
  score-backlog   */10 all day                                        daily_matches, …)
  spend-alert     10:00 UTC  →   api/spend-alert.ts    →              usage_events (read)
  deploy-edge-fns on push    →   the React SPA         →   anthropic-proxy (edge function)
                                                       →   Storage (dataplane artifacts)
+ * started by pg_cron through api/scrape-dispatch.ts, not by GitHub's own schedule (2026-09-07)
 ```
 
 Nothing here is a long-running server. Every moving part is either a scheduled job, a
@@ -227,9 +228,23 @@ the secret exists.
 
 The GitHub workflows stay as a second belt. Both callers are idempotent (the shared
 scores ledger, issue #135), so a doubled tick costs one read, never a double
-purchase. Work that runs ON a runner rather than behind an endpoint — the scrape,
-the JD backfill, the company-data catch-up — still depends on GitHub cron; if that
-starves again, trigger it from the Actions tab or move it behind an endpoint too.
+purchase.
+
+The scrape is the exception: it runs ON a runner (ten Node steps, minutes of
+runtime), so it cannot sit behind an endpoint. Until 2026-09-07 it kept GitHub's
+own `schedule:` and got a watchdog instead (`northgoing-scrape-watchdog`, 05:15
+UTC, `api/scrape-watchdog.ts`). Then seven mornings in a row (9-01 to 9-07) the
+03:47 schedule fired between 07:52 and 08:55 UTC: the watchdog restarted the
+scrape every day, the digest was served from the restart, and GitHub's late run
+scraped the pool a second time. So pg_cron now starts the scrape too:
+`northgoing-scrape-dispatch` calls `tick_worker('scrape-dispatch')` at 03:47 UTC
+(migration `20260907190000_scrape_dispatch_pg_cron.sql`), and
+`api/scrape-dispatch.ts` asks GitHub for a `workflow_dispatch` of `scrape.yml` on
+`main` with `reason=scheduled`. `scrape.yml` has no `schedule:` block any more;
+the watchdog is unchanged and stays the guard for a morning the dispatch never
+reaches GitHub. The shared GitHub call is `src/lib/githubDispatch.ts`. The
+run-name tells the three starts apart: `Scrape jobs (scheduled)`, `Scrape jobs
+(watchdog restart)`, and plain `Scrape jobs` for a hand-started run.
 
 To rotate the database's secret: set a new value in Vercel (`CRON_SECRET_DB`) and
 the same value in Vault (`cron_secret_db`); nothing in the repo changes.

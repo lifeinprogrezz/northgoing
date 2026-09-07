@@ -143,6 +143,10 @@ describe("the email the owner reads", () => {
     expect(subject).not.toContain("restarting");
     expect(body).toContain("27 hours");
     expect(body).toContain("Actions tab");
+    // 2026-09-07: the daily start is pg_cron's, so "no run at all" must point
+    // the reader at the dispatch, not at a GitHub schedule that no longer exists.
+    expect(body).toContain("03:47 pg_cron dispatch did not reach GitHub");
+    expect(body).not.toContain("GitHub scheduler");
     expect(body).toContain("2026-08-28T08:00:00.000Z");
     expect(subject + body).not.toContain("—");
   });

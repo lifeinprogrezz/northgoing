@@ -23,9 +23,16 @@
 // deps argument on the handler, plus the fetchImpl argument on the three calls
 // that leave the machine, all defaulting to the real thing.
 //
-// Scheduled by pg_cron at 05:15 UTC — after the scrape workflow's 03:47
-// schedule, BEFORE the 06:00 nightly scorer, so a restart refills the pool in
-// time for the digest (supabase/migrations/20260831160000_scrape_watchdog_0515.sql).
+// Scheduled by pg_cron at 05:15 UTC, after the scrape's 03:47 UTC start,
+// BEFORE the 06:00 nightly scorer, so a restart refills the pool in time for
+// the digest (supabase/migrations/20260831160000_scrape_watchdog_0515.sql).
+//
+// Since 2026-09-07 the 03:47 start is pg_cron's too: api/scrape-dispatch.ts
+// asks GitHub for the run, because GitHub's own schedule fired between 07:52
+// and 08:55 seven mornings in a row and this watchdog restarted the scrape
+// every one of them. The GitHub dispatch call both endpoints make lives in
+// src/lib/githubDispatch.ts. This watchdog's behaviour did not change: it is
+// the guard for the morning the dispatch never reaches GitHub.
 //
 // Env: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / RESEND_API_KEY / CRON_SECRET
 // (same contract as api/spend-alert.ts) + optional OWNER_ALERT_EMAIL,
@@ -43,6 +50,7 @@ import {
   type DataplaneProbe,
 } from "../src/lib/scrapeWatchdog.js";
 import { reportApiError, setRunSummary, withSentry } from "../src/lib/apiSentry.js";
+import { DEFAULT_REPO, WORKFLOW_FILE, dispatchWorkflow, githubHeaders } from "../src/lib/githubDispatch.js";
 
 type Req = { method?: string; headers: Record<string, string | string[] | undefined> };
 type Res = { status: (code: number) => Res; json: (body: unknown) => void };
@@ -53,9 +61,7 @@ const DEFAULT_OWNER_EMAIL = "hello@lifeinprogrezz.com";
 
 const BUCKET = "dataplane";
 const ARTIFACT = "dataplane.json";
-const DEFAULT_REPO = "lifeinprogrezz/northgoing";
-const WORKFLOW_FILE = "scrape.yml";
-const WORKFLOW_REF = "main";
+const GITHUB_CALLER = "scrape-watchdog";
 
 const escapeHtml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -134,13 +140,6 @@ export async function probeDataplane(db: StorageClient): Promise<DataplaneProbe>
   }
 }
 
-const githubHeaders = (token: string) => ({
-  Authorization: `Bearer ${token}`,
-  Accept: "application/vnd.github+json",
-  "X-GitHub-Api-Version": "2022-11-28",
-  "User-Agent": "northgoing-scrape-watchdog",
-});
-
 /**
  * When did THE WATCHDOG last start this workflow? `null` inside `readable: true`
  * means it never has. A failed read returns `readable: false`, which stops the
@@ -160,7 +159,7 @@ async function lastDispatchedRun(
 ): Promise<{ readable: boolean; lastDispatchAt: string | null }> {
   try {
     const url = `https://api.github.com/repos/${repo}/actions/workflows/${WORKFLOW_FILE}/runs?event=workflow_dispatch&per_page=30`;
-    const res = await fetchImpl(url, { headers: githubHeaders(token) });
+    const res = await fetchImpl(url, { headers: githubHeaders(token, GITHUB_CALLER) });
     if (!res.ok) {
       console.warn(`[scrape-watchdog] GitHub runs ${res.status}:`, await res.text().catch(() => ""));
       return { readable: false, lastDispatchAt: null };
@@ -174,32 +173,6 @@ async function lastDispatchedRun(
   } catch (e) {
     console.warn("[scrape-watchdog] GitHub runs fetch failed:", e);
     return { readable: false, lastDispatchAt: null };
-  }
-}
-
-/** Start the scrape workflow. Fail-soft: logs and returns false, never throws. */
-async function dispatchWorkflow(repo: string, token: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  try {
-    const url = `https://api.github.com/repos/${repo}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
-    const res = await fetchImpl(url, {
-      method: "POST",
-      headers: { ...githubHeaders(token), "Content-Type": "application/json" },
-      // `reason` is what marks the run as the watchdog's own in the run list,
-      // so the once-a-day bound above can find it again tomorrow.
-      body: JSON.stringify({ ref: WORKFLOW_REF, inputs: { reason: WATCHDOG_DISPATCH_REASON } }),
-    });
-    if (!res.ok) {
-      console.warn(`[scrape-watchdog] GitHub dispatch ${res.status}:`, await res.text().catch(() => ""));
-      reportApiError(`[scrape-watchdog] GitHub dispatch non-ok ${res.status}`, { status: res.status });
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.warn("[scrape-watchdog] GitHub dispatch failed:", e);
-    reportApiError("[scrape-watchdog] GitHub dispatch threw", {
-      cause: e instanceof Error ? e.name : "unknown",
-    });
-    return false;
   }
 }
 
@@ -278,8 +251,18 @@ export async function handler(req: Req, res: Res, deps: WatchdogDeps = {}): Prom
 
   // The restart is attempted BEFORE the email is composed, so the email can say
   // what actually happened. `null` means no restart was attempted at all.
+  // `reason` is what marks the run as the watchdog's own in the run list, so
+  // the once-a-day bound above can find it again tomorrow.
   let dispatched: boolean | null = null;
-  if (decision.dispatch) dispatched = await dispatchWorkflow(repo, dispatchToken, doFetch);
+  if (decision.dispatch) {
+    dispatched = await dispatchWorkflow({
+      repo,
+      token: dispatchToken,
+      reason: WATCHDOG_DISPATCH_REASON,
+      caller: GITHUB_CALLER,
+      fetchImpl: doFetch,
+    });
+  }
 
   let emailed = false;
   if (verdict.alert) {

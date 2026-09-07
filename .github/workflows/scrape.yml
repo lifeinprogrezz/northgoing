@@ -1,13 +1,22 @@
 name: Scrape jobs
 
-# The run's own name says who asked for it. The scrape watchdog restarts this
-# workflow at most once a day, and it proves it has stayed inside that bound by
-# reading the run list. Until 2026-08-28 it read the newest workflow_dispatch run
-# of any kind, so a run Rober started by hand spent the watchdog's daily budget:
-# on that morning the pool was 15.6 hours stale and the restart was skipped
-# because of a manual run 20.8 hours earlier. A marked run-name separates the two.
+# The run's own name says who asked for it, and three parties can ask:
+#
+#   'scheduled'  api/scrape-dispatch.ts, from pg_cron at 03:47 UTC. The daily start.
+#   'watchdog'   api/scrape-watchdog.ts, from pg_cron at 05:15 UTC. A restart, only
+#                when the morning's run did not publish a fresh dataplane.
+#   'manual'     a person, from the Actions tab.
+#
+# The watchdog restarts this workflow at most once a day, and it proves it has
+# stayed inside that bound by reading the run list for its own marker. Until
+# 2026-08-28 it read the newest workflow_dispatch run of any kind, so a run
+# Rober started by hand spent the watchdog's daily budget: on that morning the
+# pool was 15.6 hours stale and the restart was skipped because of a manual run
+# 20.8 hours earlier. A marked run-name separates the parties. The scheduled
+# start gets its own name for the same reason: it must never read as a watchdog
+# restart, or the daily start would spend the restart budget every morning.
 # Read by api/scrape-watchdog.ts through isWatchdogRestart (src/lib/scrapeWatchdog.ts).
-run-name: ${{ inputs.reason == 'watchdog' && 'Scrape jobs (watchdog restart)' || 'Scrape jobs' }}
+run-name: ${{ inputs.reason == 'watchdog' && 'Scrape jobs (watchdog restart)' || inputs.reason == 'scheduled' && 'Scrape jobs (scheduled)' || 'Scrape jobs' }}
 
 # Daily refresh of the shared `jobs` pool (scripts/scrape.mjs).
 #
@@ -18,25 +27,40 @@ run-name: ${{ inputs.reason == 'watchdog' && 'Scrape jobs (watchdog restart)' ||
 # Until both exist, scrape.mjs dry-runs (fetch + log, no DB write), so this workflow is safe to land now.
 # OPTIONAL: ANTHROPIC_API_KEY enables the Haiku JD-grounded pass in the enrich step below;
 # without it, enrichment still runs on free web (og:description) + Wikidata sources.
+#
+# THERE IS NO `schedule:` HERE ON PURPOSE (2026-09-07). This workflow is started
+# by pg_cron inside Supabase, through api/scrape-dispatch.ts, at 03:47 UTC.
+#
+# The history, so nobody puts the cron back:
+#   - Until 2026-08-31 it was "0 5 * * *". GitHub's top-of-the-hour slots are
+#     congested: 8-29 fired 11:29, 8-30 fired 10:17, 8-31 never fired, and the
+#     06:00 scorer matched a day-old pool.
+#   - From 2026-08-31 it was "47 3 * * *", an off-peak odd minute, with the
+#     watchdog moved to 05:15 as the guard. Seven mornings out of seven (9-01
+#     to 9-07) that schedule fired between 07:52 and 08:55 UTC. Every morning
+#     the 05:15 watchdog found the pool about 21 hours stale, restarted this
+#     workflow, and emailed the owner; every 06:00 digest was served from that
+#     restart; and GitHub's late run then scraped the whole pool a SECOND time
+#     (extract and enrich spend, a second dataplane publish). The 8-28 rule was
+#     "third strike and the scrape leaves GitHub cron".
+#   - Since 2026-09-07 pg_cron owns the start, the scheduler that has fired on
+#     the minute since 8-27 for the other three workers. pg_cron job
+#     `northgoing-scrape-dispatch` runs public.tick_worker('scrape-dispatch')
+#     (supabase/migrations/20260907190000_scrape_dispatch_pg_cron.sql); that
+#     endpoint POSTs a workflow_dispatch of this file on main with
+#     reason=scheduled. Keeping GitHub's cron as a third belt was rejected: it
+#     is exactly what caused the second scrape.
+#
+# The ordering the scorer depends on still holds: 03:47 start, the ten steps
+# finish well inside the hour, 05:15 watchdog, 06:00 scorer (nightly.yml). If
+# the 03:47 dispatch never reaches GitHub, the watchdog restarts the run at
+# 05:15 and the digest still sees a fresh pool.
 
 on:
-  schedule:
-    # 03:47 UTC, WELL BEFORE the nightly scorer (nightly.yml repeat trigger:
-    # /api/nightly, kicks off at 06:00) — both used to fire at 06:00, so scoring
-    # raced the scrape and could read yesterday's pool (Track D S6). Scrape+extract+
-    # enrich finish well inside the hour; if this ever slips past 06:00 the scorer
-    # just sees yesterday's jobs once, it never breaks.
-    #
-    # Was "0 5 * * *" until 2026-08-31: GitHub top-of-the-hour cron slots are
-    # congested and the 05:00 fire drifted past 10:00 or dropped entirely three
-    # days running (8-29 fired 11:29, 8-30 fired 10:17, 8-31 never fired), so the
-    # 06:00 scorer matched a day-old pool. An off-peak odd minute keeps >2h of
-    # drift headroom before the scorer.
-    - cron: "47 3 * * *"
   workflow_dispatch:
-    # Manual trigger from the Actions tab. Leave `reason` alone when you start a
-    # run yourself: only the watchdog sends 'watchdog', and only that value marks
-    # the run as one of its own once-a-day restarts.
+    # The two pg_cron callers send 'scheduled' and 'watchdog'. Leave `reason`
+    # alone when you start a run yourself: 'manual' is the honest name, and only
+    # 'watchdog' marks a run as one of the watchdog's own once-a-day restarts.
     #
     # TESTING THE MARKER COSTS THE REAL BUDGET. A run dispatched by hand with
     # reason=watchdog is indistinguishable from the watchdog's own, so it spends
@@ -45,6 +69,7 @@ on:
     # verifying this on 2026-08-28. Cancel AND delete the run afterwards
     # (`gh api -X DELETE repos/<repo>/actions/runs/<id>`, only once it has
     # finished cancelling), or the verification recreates the bug it proved fixed.
+    # reason=scheduled is safe to send by hand: it names the run, nothing reads it back.
     inputs:
       reason:
         description: "Who asked for this run"
