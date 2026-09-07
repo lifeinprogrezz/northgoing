@@ -4,8 +4,11 @@
 // ~6k-job payload, and a failed day contributes zero rows while the run stays
 // green. Each catalogue GET (/api/startups, /api/jobs) now gets a 90 s timeout
 // and up to 3 attempts with a 2 s then 8 s backoff; a 4xx is a block, not a
-// hiccup, and is never retried. fetchImpl and sleep are injected, so the suite
-// touches no network and no real clock.
+// hiccup, and is never retried. The body read is part of the attempt (review
+// round 1): the same signal governs res.json() and /api/jobs is ~9 MB, so a
+// timeout or a truncated body while it streams must count as a failed attempt
+// with its WARN line, not escape unretried. fetchImpl and sleep are injected,
+// so the suite touches no network and no real clock.
 //
 // The suite runs under vitest's jsdom environment (src/test/setup.ts needs
 // window) and jsdom's AbortSignal has no static timeout(). The source calls
@@ -42,6 +45,17 @@ const http = (status: number): Step => async () => new Response("", { status });
 const netFail = (message: string): Step => async () => {
   throw new TypeError(message);
 };
+/** Headers arrive ok, then the body read rejects: what a timeout firing while
+ *  the ~9 MB /api/jobs stream runs looks like from the caller's side. */
+const bodyTimeout = (): Step => async () => {
+  const res = new Response("{", { status: 200 });
+  res.json = async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+  return res;
+};
+/** A real truncated body: the proxy closed mid-stream, json() throws SyntaxError. */
+const truncated = (): Step => async () => new Response('{"jobs":[{"jobs_id":42,', { status: 200 });
 
 /** A fetch whose per-endpoint script is consumed one step per call; the last
  *  step repeats, so a "fails forever" endpoint is one step long. */
@@ -151,6 +165,47 @@ describe("retry budget", () => {
     });
     await expect(fetchStartupmap({ fetchImpl, sleep })).rejects.toThrow("jobs HTTP 503");
     expect(calls.jobs).toBe(3);
+  });
+});
+
+describe("body read is inside the attempt", () => {
+  it("a timeout during the body read is retried: rows returned, 2 calls, 1 WARN line", async () => {
+    const { fetchImpl, calls } = scriptedFetch({
+      startups: [ok(STARTUPS)],
+      jobs: [bodyTimeout(), ok(JOBS)],
+    });
+    const rows = await fetchStartupmap({ fetchImpl, sleep });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ company: "Acme", url: "https://jobs.example.com/acme/pm" });
+    expect(calls).toEqual({ startups: 1, jobs: 2 });
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([2_000]);
+    const lines = warnLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("WARN startupmap /api/jobs attempt 1/3 failed");
+    expect(lines[0]).toContain("The operation was aborted due to timeout");
+  });
+
+  it("a truncated body (json() throws SyntaxError) is retried the same way", async () => {
+    const { fetchImpl, calls } = scriptedFetch({
+      startups: [truncated(), ok(STARTUPS)],
+      jobs: [ok(JOBS)],
+    });
+    const rows = await fetchStartupmap({ fetchImpl, sleep });
+    expect(rows).toHaveLength(1);
+    expect(calls).toEqual({ startups: 2, jobs: 1 });
+    expect(warnLines()).toHaveLength(1);
+    expect(warnLines()[0]).toContain("/api/startups attempt 1/3");
+  });
+
+  it("body-read failures spend the same 3-attempt budget and then throw", async () => {
+    const { fetchImpl, calls } = scriptedFetch({
+      startups: [ok(STARTUPS)],
+      jobs: [bodyTimeout()],
+    });
+    await expect(fetchStartupmap({ fetchImpl, sleep })).rejects.toThrow("The operation was aborted due to timeout");
+    expect(calls.jobs).toBe(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(warnLines()).toHaveLength(3);
   });
 });
 

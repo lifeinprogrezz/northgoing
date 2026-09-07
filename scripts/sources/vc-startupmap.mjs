@@ -281,8 +281,13 @@ const STARTUPMAP_BASE = "https://startupmap.one";
 // response and is never retried. Every failed attempt logs one WARN line to
 // stderr; after the last one the helper throws the same error scrape.mjs
 // already logs ("startups HTTP n" / "jobs HTTP n" / the fetch error itself).
-// fetchImpl and sleep are injectable so src/test/startupmap-retry.test.ts needs
-// no network and no real clock. The other boards keep the 20 s TIMEOUT_MS.
+// The body read is part of the attempt (review round 1, 2026-09-07): the same
+// signal governs res.json(), /api/jobs is ~9 MB and its transfer is the part a
+// slow proxy stretches, so a timeout or a truncated body while it streams is
+// the measured failure class. Reading it outside the loop let that rejection
+// escape with no WARN line and no retry. fetchImpl and sleep are injectable so
+// src/test/startupmap-retry.test.ts needs no network and no real clock. The
+// other boards keep the 20 s TIMEOUT_MS.
 export const STARTUPMAP_TIMEOUT_MS = 90_000;
 export const STARTUPMAP_ATTEMPTS = 3;
 export const STARTUPMAP_BACKOFF_MS = [2_000, 8_000];
@@ -296,10 +301,15 @@ async function fetchStartupmapEndpoint(name, headers, { fetchImpl, sleep }) {
     try {
       res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(STARTUPMAP_TIMEOUT_MS) });
     } catch (e) {
-      error = e; // proxy / network / timeout: a hiccup, retried
+      error = e; // proxy / network / timeout before the headers: a hiccup, retried
     }
-    if (res && res.ok) return res;
-    if (res) {
+    if (res && res.ok) {
+      try {
+        return await res.json(); // the parsed payload, not the Response
+      } catch (e) {
+        error = e; // timeout or truncated body while the ~9 MB stream runs: a hiccup, retried
+      }
+    } else if (res) {
       error = new Error(`${name} HTTP ${res.status}`);
       if (res.status >= 400 && res.status < 500) throw error; // a block, not a hiccup: never retried
     }
@@ -320,13 +330,13 @@ function extractArray(payload, keyHint) {
 
 export async function fetchStartupmap({ fetchImpl = pfetch, sleep = sleepMs } = {}) {
   const headers = { "User-Agent": "career-ops/1.0 (+lifeinprogrezz personal)" };
-  const [cosRes, jobsRes] = await Promise.all([
+  const [cosPayload, jobsPayload] = await Promise.all([
     fetchStartupmapEndpoint("startups", headers, { fetchImpl, sleep }),
     fetchStartupmapEndpoint("jobs", headers, { fetchImpl, sleep }),
   ]);
-  const companies = extractArray(await cosRes.json(), "startups");
+  const companies = extractArray(cosPayload, "startups");
   const companiesById = new Map(companies.map((c) => [c.startup_id, c]));
-  const jobs = extractArray(await jobsRes.json(), "jobs");
+  const jobs = extractArray(jobsPayload, "jobs");
 
   return jobs
     .filter((j) => j.visible !== false && isInScope(j.job_title))
