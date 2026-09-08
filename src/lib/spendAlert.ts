@@ -27,8 +27,14 @@ export type SpendSnapshot = {
   monthToDate: number;
   /** Daily totals for the 7 UTC days BEFORE yesterday (zero-filled). */
   trailingDays: number[];
-  /** Yesterday's per-user totals. */
+  /** Yesterday's per-user totals. REAL users only: rows with no user_id are pipeline work. */
   yesterdayUsers: UserDay[];
+  /**
+   * Yesterday's spend carrying no user_id (extract, enrich, jd-backfill, the
+   * scrape's own scoring). Reported on its own line; never a "user" in the
+   * outlier check. 2026-09-07 it read "One user (anonymous) cost $0.66".
+   */
+  systemYesterday?: number;
 };
 
 export type SpendDecision = {
@@ -95,6 +101,7 @@ export function buildSpendAlertBody(d: SpendDecision, s: SpendSnapshot): string 
     `Trailing-7-day median (the 7 days before yesterday): ${usd(d.dayMedian)}`,
     `Trailing days, oldest first: ${s.trailingDays.map(usd).join(", ")}`,
     `Month to date: ${usd(s.monthToDate)}`,
+    `System spend (pipeline, no user): ${usd(s.systemYesterday ?? 0)}`,
     `Users with spend yesterday: ${s.yesterdayUsers.length}`,
     `Median user's day: ${usd(d.userMedian)}`,
     d.topUser ? `Top user: ${d.topUser.userId} at ${usd(d.topUser.cost)}` : "Top user: none",

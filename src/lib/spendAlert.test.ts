@@ -72,6 +72,45 @@ describe("decideSpendAlert", () => {
     expect(d.reasons).toHaveLength(2);
   });
 
+  it("pipeline spend with no user is reported as system and never counts as a user", () => {
+    // 2026-09-07 live: extract $0.43 + enrich $0.23 carried no user_id and the mail read
+    // "One user (anonymous) cost $0.66 yesterday, 15.5x the median user's day".
+    const d = decideSpendAlert({
+      yesterday: 0.81,
+      monthToDate: 4.2,
+      trailingDays: [0.56, 0.24, 0.6, 0.7, 0.5, 0.65, 0.58],
+      systemYesterday: 0.66,
+      yesterdayUsers: [
+        { userId: "u1", cost: 0.06 },
+        { userId: "u2", cost: 0.04 },
+        { userId: "u3", cost: 0.03 },
+        { userId: "u4", cost: 0.02 },
+      ],
+    });
+    expect(d.alert).toBe(false);
+    expect(d.topUser?.userId).toBe("u1");
+    expect(d.reasons).toHaveLength(0);
+    const body = buildSpendAlertBody(d, {
+      yesterday: 0.81,
+      monthToDate: 4.2,
+      trailingDays: [0.56, 0.24, 0.6, 0.7, 0.5, 0.65, 0.58],
+      systemYesterday: 0.66,
+      yesterdayUsers: [{ userId: "u1", cost: 0.06 }],
+    });
+    expect(body).toMatch(/System spend \(pipeline, no user\): \$0\.66/);
+    expect(body).not.toMatch(/anonymous/);
+  });
+
+  it("still flags a real whale when system spend is present", () => {
+    const d = decideSpendAlert({
+      ...quiet,
+      systemYesterday: 5,
+      yesterdayUsers: [...quiet.yesterdayUsers, { userId: "whale", cost: 0.95 * USER_MULTIPLIER + 0.01 }],
+    });
+    expect(d.alert).toBe(true);
+    expect(d.topUser?.userId).toBe("whale");
+  });
+
   it("never alerts on a single user (the median user IS the top user)", () => {
     const d = decideSpendAlert({ ...quiet, yesterdayUsers: [{ userId: "solo", cost: 2.7 }] });
     expect(d.alert).toBe(false);
