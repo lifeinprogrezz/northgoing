@@ -42,12 +42,16 @@ const num = (v: number | string | null | undefined): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
-function toSnapshot(row: SnapshotRow): SpendSnapshot {
+// Rows with no user_id are the pipeline's own work (extract, enrich, jd-backfill).
+// They go to `systemYesterday`, never into the per-user outlier check.
+export function toSnapshot(row: SnapshotRow): SpendSnapshot {
+  const users = row.yesterday_users ?? [];
   return {
     yesterday: num(row.yesterday),
     monthToDate: num(row.month_to_date),
     trailingDays: (row.trailing_days ?? []).map((d) => num(d.cost)),
-    yesterdayUsers: (row.yesterday_users ?? []).map((u) => ({ userId: u.user_id ?? "anonymous", cost: num(u.cost) })),
+    systemYesterday: users.filter((u) => u.user_id == null).reduce((sum, u) => sum + num(u.cost), 0),
+    yesterdayUsers: users.filter((u) => u.user_id != null).map((u) => ({ userId: u.user_id as string, cost: num(u.cost) })),
   };
 }
 
@@ -112,6 +116,7 @@ async function handler(req: Req, res: Res): Promise<void> {
     trailingDays: snapshot.trailingDays,
     dayMedian: decision.dayMedian,
     dayMultiple: decision.dayMultiple,
+    systemYesterday: snapshot.systemYesterday,
     usersYesterday: snapshot.yesterdayUsers.length,
     userMedian: decision.userMedian,
     topUser: decision.topUser,
