@@ -328,6 +328,18 @@ function extractArray(payload, keyHint) {
   return [];
 }
 
+// startupmap sends the company HOMEPAGE as apply_url when a posting has no apply link
+// ("https://www.born.com/", 5 live rows on 2026-09-08). The posting is real; the link
+// is not. Treat a bare host like an absent apply_url and fall through to the job page.
+export function isBareHostUrl(u) {
+  try {
+    const { pathname, search, hash } = new URL(u);
+    return (pathname === "/" || pathname === "") && !search && !hash;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchStartupmap({ fetchImpl = pfetch, sleep = sleepMs } = {}) {
   const headers = { "User-Agent": "career-ops/1.0 (+lifeinprogrezz personal)" };
   const [cosPayload, jobsPayload] = await Promise.all([
@@ -351,7 +363,7 @@ export async function fetchStartupmap({ fetchImpl = pfetch, sleep = sleepMs } = 
       return {
         company: (co && co.name) || null,
         title: j.job_title,
-        url: j.apply_url || startupmapUrl,
+        url: j.apply_url && !isBareHostUrl(j.apply_url) ? j.apply_url : startupmapUrl,
         location,
         remote: /remote/i.test(location || "") || /remote/i.test(j.job_title || ""),
         source: "startupmap",

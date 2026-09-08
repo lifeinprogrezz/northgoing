@@ -101,6 +101,28 @@ afterEach(() => {
 
 const warnLines = () => warn.mock.calls.map((c) => String(c[0]));
 
+describe("apply_url that is a bare company homepage", () => {
+  // 5 live rows on 2026-09-08 had url = "https://www.born.com/" and the like: startupmap
+  // sends the company site when a posting has no apply link. The posting is real; the
+  // link is not. Fall through to the startupmap job page, as when apply_url is absent.
+  it("falls back to the startupmap job page instead of publishing the homepage", async () => {
+    const jobs = {
+      jobs: [
+        { jobs_id: 7, startup_id: 1, job_title: "Product Manager", apply_url: "https://www.born.com/", posted_at: "2026-09-01" },
+        { jobs_id: 8, startup_id: 1, job_title: "Product Manager, Growth", apply_url: "https://transferz.recruitee.com", posted_at: "2026-09-01" },
+        { jobs_id: 9, startup_id: 1, job_title: "Senior Product Manager", apply_url: "https://jobs.example.com/acme/spm", posted_at: "2026-09-01" },
+      ],
+    };
+    const { fetchImpl } = scriptedFetch({ startups: [ok(STARTUPS)], jobs: [ok(jobs)] });
+    const rows = await fetchStartupmap({ fetchImpl, sleep });
+    expect(rows.map((r) => r.url)).toEqual([
+      "https://startupmap.one/job/7",
+      "https://startupmap.one/job/8",
+      "https://jobs.example.com/acme/spm",
+    ]);
+  });
+});
+
 describe("retry budget", () => {
   it("returns rows after fail, fail, succeed and makes exactly 3 calls to that endpoint", async () => {
     const { fetchImpl, calls } = scriptedFetch({
